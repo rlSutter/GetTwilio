@@ -1,8 +1,79 @@
 # GetTwilio Webhook Service
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Design](#design)
+3. [Architecture](#architecture)
+4. [Data Model](#data-model)
+5. [Database Schema](#database-schema)
+6. [Data Structures](#data-structures)
+7. [Webhook Payload Format](#webhook-payload-format)
+8. [Business Logic](#business-logic)
+9. [Assumptions](#assumptions)
+10. [Error Handling](#error-handling)
+11. [Security Considerations](#security-considerations)
+12. [Configuration](#configuration)
+13. [Deployment](#deployment)
+14. [Monitoring and Maintenance](#monitoring-and-maintenance)
+15. [API Reference](#api-reference)
+16. [References](#references)
+17. [Update History](#update-history)
+18. [Notifications](#notifications)
+19. [Related Web Services](#related-web-services)
+20. [Executing](#executing)
+21. [Testing](#testing)
+22. [Logging](#logging)
+23. [Results](#results)
+
 ## Overview
 
+This service implements an integration point for the Twilio mail processing service. When an email bounces or is rejected, a defined "web hook" on that service forwards it to this service for processing. The email address is either flagged do-not-email or removed entirely, and an activity is created, for everyone processed. This service is complemented by the CMProcessEmailImport agent which processes returned email reports from Mandrill in batch.
+
 The GetTwilio webhook service is a C# ASP.NET web service that processes email delivery status notifications from Twilio/SendGrid. When emails are sent through Twilio's email service, delivery events (bounces, opens, clicks, spam reports, unsubscribes, etc.) are sent as webhook notifications to this service, which then updates the corresponding database records to track email engagement and manage email suppression lists.
+
+### Purpose
+This service serves as a bridge between the Twilio email platform and the internal customer relationship management system, ensuring that all email delivery events are properly recorded and tracked for customer service follow-up and email list maintenance.
+
+### Scope
+The service handles:
+- Real-time email delivery event processing
+- Email address validation and suppression
+- Contact record updates
+- Activity record creation in the CRM system
+- Email engagement tracking
+- Destination cleanup for invalid contacts
+
+## Design
+
+### System Architecture
+
+The GetTwilio service follows a layered architecture pattern with clear separation of concerns:
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Twilio        │──▶│  GetTwilio.ashx │───▶│   SQL Server    │
+│   Email Service │    │   Web Service   │    │   Database      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              │
+                              ▼
+                       ┌─────────────────┐
+                       │   Log4net       │
+                       │   Logging       │
+                       └─────────────────┘
+```
+
+### Design Principles
+
+1. **Single Responsibility**: Each component has a specific, well-defined purpose
+2. **Fail-Safe**: Comprehensive error handling and logging
+3. **Performance**: Efficient database operations with connection pooling
+4. **Maintainability**: Clear code structure and comprehensive documentation
+5. **Security**: Input validation and SQL injection prevention
+
+### Integration Overview
+
+See BulkMailServer#Bounce_Mail_Administration for information regarding the integration, and an overview of this system.
 
 ## Architecture
 
@@ -22,6 +93,47 @@ The GetTwilio webhook service is a C# ASP.NET web service that processes email d
 5. Updates contact record based on event type (suppresses email or tracks engagement)
 6. Creates activity record for audit trail
 7. Logs processing results and performance data
+
+## Data Model
+
+In order to support the information generated from this service, the following fields have special meaning in an activity created from this service:
+
+| FIELD | DESCRIPTION |
+|-------|-------------|
+| EMAIL_RECIP_ADDR | Contains the email address operated on |
+| SRA_TYPE_CD | Mapped to code "Data Maintenance" |
+| COMMENTS_LONG | Contains the notice and the SMTP error message |
+
+The Twilio service provides data in JSON object format. The Newtonsoft JSON.Net library is used to convert this into C# classes.
+
+### Data Structures
+
+The class defined to receive data from JSON is as follows:
+
+```csharp
+public class SmtpEvent
+{
+    public string email { get; set; }
+    public int timestamp { get; set; }
+    [JsonProperty(PropertyName = "smtp-id")]
+    public string smtpid { get; set; }
+    [JsonProperty(PropertyName = "event")]
+    public string mailevent { get; set; }
+    public string category { get; set; }
+    public string sg_event_id { get; set; }
+    public string sg_message_id { get; set; }
+    public string reason { get; set; }
+    public string status { get; set; }
+    public string response { get; set; }
+    public int attempt { get; set; }
+    public string useragent { get; set; }
+    public string ip { get; set; }
+    public string url { get; set; }
+    public int asm_group_id { get; set; }
+    public string tls { get; set; }
+    public string type { get; set; }
+}
+```
 
 ## Database Schema
 
@@ -73,55 +185,100 @@ Tracks suppressed email addresses and reasons for suppression.
 ```xml
 <appSettings>
     <!-- Debug mode: Y=Yes, N=No, T=Trace -->
-    <add key="GetTwilio_debug" value="N" />
+    <add key="GetTwilio_debug" value="Y" />
     
     <!-- Employee ID for activity records -->
-    <add key="GetChat_EmpId" value="YOUR_EMP_ID" />
+    <add key="GetChat_EmpId" value="1-XXXXX" />
     
     <!-- Employee login for activity records -->
-    <add key="GetChat_EmpLogin" value="YOUR_EMP_LOGIN" />
+    <add key="GetChat_EmpLogin" value="TECHNICAL SUPPORT" />
 </appSettings>
 
 <connectionStrings>
-    <add name="YourConnectionStringName" 
-         connectionString="server=YOUR_SERVER\YOUR_INSTANCE;uid=YOUR_USER;pwd=YOUR_PASSWORD;database=YOUR_DATABASE" 
+    <add name="ApplicationServices"
+         connectionString="data source=.\SQLEXPRESS;Integrated Security=SSPI;AttachDBFilename=|DataDirectory|\aspnetdb.mdf;User Instance=true"
+         providerName="System.Data.SqlClient" />
+    <add name="hcidb" 
+         connectionString="server=YOUR_SERVER\YOUR_INSTANCE;uid=YOUR_USER;pwd=YOUR_PASSWORD;Min Pool Size=3;Max Pool Size=5;Connect Timeout=10;database=" 
          providerName="System.Data.SqlClient" />
 </connectionStrings>
 ```
 
+### Configuration Item Descriptions
+
+The following is a description of the configuration items:
+
+- **GetTwilio_debug**: The only way to enable debug mode. The value stored here turns that mode on or off.
+- **GetChat_EmpId**: Used to specify the employee id for activities generated.
+- **GetChat_EmpLogin**: Used to specify the employee login for activities generated.
+- **hcidb connectionString**: Used to specify the database connection string.
+
+This is extracted using the following code in the service:
+
+```csharp
+// ============================================
+// Debug Setup
+mypath = HttpRuntime.AppDomainAppPath;
+Logging = "Y";
+try
+{
+    temp = WebConfigurationManager.AppSettings["GetTwilio_debug"];
+    Debug = temp;
+    EmpId = WebConfigurationManager.AppSettings["GetChat_EmpId"];
+    if (EmpId == "") { EmpId = "1-XXXXX"; }
+    EmpLogin = WebConfigurationManager.AppSettings["GetChat_EmpLogin"];
+    if (EmpLogin == "") { EmpLogin = "TECHNICAL SUPPORT"; }
+}
+catch { }
+
+// ============================================
+// Get system defaults
+ConnectionStringSettings connSettings = ConfigurationManager.ConnectionStrings["hcidb"];
+if (connSettings != null)
+{
+    ConnS = connSettings.ConnectionString;
+}
+if (ConnS == "")
+{
+    ConnS = "server=YOUR_SERVER\\YOUR_INSTANCE;uid=YOUR_USER;pwd=YOUR_PASSWORD;database=yourdb";
+}
+```
+
 ### log4net Configuration
 
-The service uses log4net for logging. Configure in web.config:
+The web.config file also contains SysLog configuration information:
 
 ```xml
 <log4net>
-    <appender name="EventLogAppender" type="log4net.Appender.EventLogAppender">
-        <applicationName value="GetTwilio" />
-        <layout type="log4net.Layout.PatternLayout">
-            <conversionPattern value="%date [%thread] %-5level %logger - %message%newline" />
-        </layout>
+    <appender name="RemoteSyslogAppender" type="log4net.Appender.RemoteSyslogAppender">
+        <identity value="" />
+        <layout type="log4net.Layout.PatternLayout" value="%message"/>
+        <remoteAddress value="YOUR_SYSLOG_SERVER_IP" />
+        <filter type="log4net.Filter.LevelRangeFilter">
+            <levelMin value="DEBUG" />
+        </filter>
     </appender>
     
-    <appender name="DebugLogAppender" type="log4net.Appender.RollingFileAppender">
-        <file value="C:\Logs\GetTwilio.log" />
-        <appendToFile value="true" />
-        <rollingStyle value="Size" />
-        <maxSizeRollBackups value="10" />
-        <maximumFileSize value="10MB" />
-        <staticLogFileName value="false" />
+    <appender name="LogFileAppender" type="log4net.Appender.RollingFileAppender">
+        <file type="log4net.Util.PatternString" value="%property{LogFileName}"/>
+        <appendToFile value="true"/>
+        <rollingStyle value="Size"/>
+        <maxSizeRollBackups value="3"/>
+        <maximumFileSize value="10000KB"/>
+        <staticLogFileName value="true"/>
         <layout type="log4net.Layout.PatternLayout">
-            <conversionPattern value="%date [%thread] %-5level %logger - %message%newline" />
+            <conversionPattern value="%message%newline"/>
         </layout>
     </appender>
     
     <logger name="EventLog">
-        <level value="INFO" />
-        <appender-ref ref="EventLogAppender" />
+        <level value="ALL"/>
+        <appender-ref ref="RemoteSyslogAppender"/>
     </logger>
     
     <logger name="DebugLog">
-        <level value="DEBUG" />
-        <appender-ref ref="DebugLogAppender" />
+        <level value="ALL"/>
+        <appender-ref ref="LogFileAppender"/>
     </logger>
 </log4net>
 ```
@@ -186,8 +343,18 @@ The service expects JSON payloads in the following format (based on SendGrid web
 ### Excluded Email Addresses
 
 The service ignores the following email addresses:
-- `root@yourdomain.com`
-- `root@yourdomain2.com`
+- `root@bm2.example.com`
+- `root@bm1.example.com`
+
+## Assumptions
+
+The following assumptions are made about the system:
+
+1. **JSON Format**: The supplied JSON file is properly formed and follows the Twilio webhook format.
+2. **Contact Records**: One or more email addresses exist in Contact records in the database.
+3. **Database Connectivity**: The database is accessible and the connection string is valid.
+4. **Webhook Reliability**: Twilio will deliver webhook notifications reliably.
+5. **Data Integrity**: Contact records maintain referential integrity with related tables.
 
 ## Error Handling
 
@@ -370,17 +537,138 @@ EXEC SP_RESTORE_EMAIL_ADDRESS
 3. **Connection Pooling**: Monitor database connection usage
 4. **Error Handling**: Implement proper error handling and retry logic
 
+## References
+
+The following was referenced during implementation:
+
+- **SendGrid Tracking Events Documentation**: https://sendgrid.com/docs/for-developers/tracking-events/ - Documentation for processing Twilio tracking events
+- **GetMail Service**: This service provided the model for GetTwilio
+
+## Update History
+
+### 1/20/20
+Updated to not send non-found email address notifications to SysLog
+
+### 1/21/20
+Updated to only create activities for the first contact record associated with an email address
+
+### 2/17/20
+Updated to use the read-only instance for querying for contacts and to support WebServicesSecurity#Version_Management
+
+## Notifications
+
+None at this time.
+
+## Related Web Services
+
+This service was based on the GetMail service
+
+- **GenerateRecordId**: Used to generate a new S_EVT_ACT.ROW_ID
+- **LogPerformanceData**: Logs performance statistics on this service
+
+## Executing
+
+This service is executed by Twilio using the following URL:
+```
+http://your-domain.com/GetTwilio.ashx
+```
+
+The service is provided a JSON object similar to the following (and formatted using https://jsonlint.com/):
+
+```json
+[{
+   "email": "user@example.com",
+   "event": "open",
+   "ip": "192.168.1.100",
+   "mc_stats": "singlesend",
+   "phase_id": "send",
+   "send_at": "1579273200",
+   "sg_content_type": "html",
+   "sg_event_id": "rj-R1PW0Rq2IrKcWXRYhWA",
+   "sg_message_id": "_vRkOqq9Qaq5zWOfkmsGBw.filterdrecv-p3mdw1-56c97568b5-bclrh-18-5E21CC0E-FC.3",
+   "sg_template_id": "d-850bd1f51d8e4c758ecb75b67e83a367",
+   "sg_template_name": "Version 2019-12-11T16:02:40.342Z",
+   "singlesend_id": "a890067f-1c2f-11ea-83c1-a2107c0f88d5",
+   "template_id": "d-850bd1f51d8e4c758ecb75b67e83a367",
+   "timestamp": 1579291795,
+   "useragent": "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)"
+}]
+```
+
+This service attempts to parse this information to determine whom to remove/flag their email address and create an activity.
+
+## Testing
+
+This web service can be tested using Fiddler (available at your-tools-directory\FiddlerSetup.exe) by doing the following using the Composer tab:
+
+1. Create a POST transaction to `http://your-production-server/GetTwilio.ashx` if using a production server, or `http://localhost:8080/GetTwilio.ashx` if executing on the development machine.
+2. In the Request Headers box add `Content-type: application/json; charset=utf-8`
+3. In the Request Body of the transaction, enter a test JSON object (formatted or non-formatted).
+4. Click the "Execute" button to send the transaction
+5. Check the transaction in the database in the Activities > All Activities view.
+
+The results will be reported in the log file `C:\Logs\GetTwilio.log` on the server tested or the local development workstation.
+
+## Logging
+
+This service provides a "Debug" log, `GetTwilio.log` which is produced in the log folder (`C:\Logs` on the application servers), which is initiated when the Debug parameter is set to "Y".
+
+### Debug Log Example
+
+```
+Trace Log Started 1/17/2020 3:32:03 PM
+Parameters-
+jsonString: [{"email":"user@example.com","event":"open","ip":"192.168.1.100","mc_stats":"singlesend","phase_id":"send","send_at":"1579273200","sg_content_type":"html","sg_event_id":"4ldB-uMBR_yCaElZEC3N0w","sg_message_id":"w_u0jeK0S1q9gsc4j0lORA.filterdrecv-p3las1-5bf99c48d-mg9g8-20-5E21CC15-54.14","sg_template_id":"d-850bd1f51d8e4c758ecb75b67e83a367","sg_template_name":"Version 2019-12-11T16:02:40.342Z","singlesend_id":"a890067f-1c2f-11ea-83c1-a2107c0f88d5","template_id":"d-850bd1f51d8e4c758ecb75b67e83a367","timestamp":1579293074,"useragent":"Mozilla/4.0 (compatible; ms-office; MSOffice 16)"}]
+
+MESSAGES: 
+
+0
+>id: 
+>emailAddress: user@example.com
+>EmailTime: 1/17/2020 3:31:14 PM
+>EmailEvent: open
+
+....
+Processing: 0 - user@example.com
+> toProcess: True
+> clicked: True
+> removeaddr: False
+
+Email address query: 
+SELECT ROW_ID, PR_DEPT_OU_ID, X_REGISTRATION_NUM, X_TRAINER_NUM FROM yourdb.dbo.S_CONTACT WHERE LOWER(EMAIL_ADDR)='user@example.com'
+>CON_ID: D204536YD3 >OU_ID: CLN753073 >REG_NUM: ZW1645TWUVZ     >TRAINER_NUM: 
+>ACTIVITY_ID: 9A45I805AB
+>temperror: Message sent to email address user@example.com was marked open
+
+Insert Activity query: 
+INSERT INTO yourdb.dbo.S_EVT_ACT (ACTIVITY_UID,ALARM_FLAG,APPT_REPT_FLG,APPT_START_DT,ASGN_MANL_FLG,ASGN_USR_EXCLD_FLG,BEST_ACTION_FLG,BILLABLE_FLG,CAL_DISP_FLG,COMMENTS_LONG,CONFLICT_ID,COST_CURCY_CD,COST_EXCH_DT,CREATED,CREATED_BY,CREATOR_LOGIN,DCKING_NUM,DURATION_HRS,EMAIL_ATT_FLG, EMAIL_FORWARD_FLG,EMAIL_RECIP_ADDR,EVT_PRIORITY_CD,EVT_STAT_CD,LAST_UPD,LAST_UPD_BY,MODIFICATION_NUM,NAME,OWNER_LOGIN,OWNER_PER_ID,PCT_COMPLETE,PRIV_FLG,ROW_ID,ROW_STATUS,TARGET_OU_ID,TARGET_PER_ID,TEMPLATE_FLG,TMSHT_RLTD_FLG,TODO_CD,TODO_ACTL_START_DT,TODO_ACTL_END_DT) VALUES ('9A45I805AB','N','N',GETDATE(),'Y','Y','N','N','N','Message sent to email address user@example.com was marked open',0,'USD',GETDATE(),GETDATE(),'1-3HIZ7','WEBUSER',0,0.00,'N','N','user@example.com','2-High','Done', GETDATE(),'1-3HIZ7',0,'Read message', 'WEBUSER', '',100,'N','9A45I805AB','Y','CLN753073','D204536YD3','N','N', 'Email read', '1/17/2020 3:31:14 PM', GETDATE())
+
+ltemp: 
+17/1/2020 15:32:03: OPEN for contact id 'D204536YD3' with address 'user@example.com' at 1/17/2020 3:31:14 PM stored to activity id 9A45I805AB
+
+LogPerformanceDataAsync: CLOUDSVC6 : 1/17/2020 3:32:03 PM
+
+17/1/2020 15:32:03: OPEN for contact id 'D204536YD3' with address 'user@example.com' at 1/17/2020 3:31:14 PM stored to activity id 9A45I805AB
+Trace Log Ended 1/17/2020 3:32:03 PM
+----------------------------------
+```
+
+If debug logging is disabled, transactions are logged to the SysLog server as in the following:
+
+```
+2020-01-17 15:33:31.867	your-server.example.com
+GetTwilio : 17/1/2020 15:33:36: OPEN for contact id 'N3203611UQEK' with address 'user@example.com' at 1/17/2020 3:32:27 PM stored to activity id 3IR6NFWG4J3C
+```
+
+Finally, the JSON string provided to this service itself is logged to the file `GetTwilio-JSON.log` in the same directory.
+
+## Results
+
+When this service is executed, it creates activity records in the database. There is no other results provided other than the log file.
+
 ## Version History
 
 - **v1.0.0** - Initial implementation with basic email event processing
 - **v1.0.1** - Added comprehensive logging and error handling
 - **v1.0.2** - Enhanced database schema with indexes and views
 - **v1.0.3** - Added email suppression management features
-
-## Support
-
-For technical support or questions about this service, please refer to the application logs and database records. The service includes comprehensive logging to assist with troubleshooting.
-
-## License
-
-This software is proprietary and confidential. Unauthorized copying, distribution, or modification is prohibited.
